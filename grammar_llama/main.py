@@ -16,16 +16,17 @@ DEFAULT_PROMPT = (
     "Correct the spelling, grammar, or phrasing issues in the following text. "
     "Try to match the tone of the original message. "
     "The response will be a JSON object that contains:\n "
-    " - original_grammar_strength: A ranking (1-5, 1 being poor/nearly incomprehensible, and 5 not requiring any changes)\n"
+    " - original_grammar_strength: A ranking (1-3, 1 if incomprehensible, 2 if moderate changes needed, 3 if little to no changes needed)\n"
     " - corrected_text: The corrected text\n"
     " - summary_of_corrections: A brief summary of the changes made\n"
     " - tone: One word describing the tone of the message (friendly, casual, professional, sarcastic, etc.)"
     "Use only JSON-safe characters in your response."
 )
 
-RED = '\033[91m'
-GREEN = '\033[92m'
-RESET = '\033[0m'
+RED = "\033[91m"
+GREEN = "\033[92m"
+RESET = "\033[0m"
+
 
 def get_model() -> str:
     model = os.getenv("CHECKER_MODEL")
@@ -36,8 +37,9 @@ def get_prompt() -> str:
     prompt = os.getenv("CHECKER_PROMPT")
     return prompt if prompt else DEFAULT_PROMPT
 
+
 def is_mac() -> bool:
-    return sys.platform.startswith('darwin')
+    return sys.platform.startswith("darwin")
 
 
 MODEL = get_model()
@@ -48,21 +50,21 @@ controller = Controller()
 
 
 class Response(BaseModel):
-    original_grammar_strength: Literal["1", "2", "3", "4", "5"]
+    original_grammar_strength: Literal[1, 2, 3]
     corrected_text: str
     summary_of_corrections: str
     tone: str
 
 
 def get_hotkey_combo() -> str:
-    hotkey_specification = os.getenv('CHECKER_HOTKEY')
+    hotkey_specification = os.getenv("CHECKER_HOTKEY")
 
     if hotkey_specification:
         return hotkey_specification
-    elif sys.platform.startswith('darwin'):
-        return '<ctrl>+<cmd>+a'
+    elif sys.platform.startswith("darwin"):
+        return "<ctrl>+<cmd>+a"
     else:
-        return '<ctrl>+<alt>+a'
+        return "<ctrl>+<alt>+a"
 
 
 def run_startup_tasks() -> None:
@@ -82,18 +84,24 @@ def run_startup_tasks() -> None:
 
 
 def chunk_text(text: str) -> List[str]:
-    return [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
+    return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
 
 
 def print_diff(original_text: str, corrected_text: str) -> None:
     original_chunks = chunk_text(original_text)
     corrected_chunks = chunk_text(corrected_text)
-    diff = unified_diff(original_chunks, corrected_chunks, lineterm='', fromfile='original', tofile='corrected')
+    diff = unified_diff(
+        original_chunks,
+        corrected_chunks,
+        lineterm="",
+        fromfile="original",
+        tofile="corrected",
+    )
 
     for line in diff:
-        if line.startswith('+') and not line.startswith('+++'):
+        if line.startswith("+") and not line.startswith("+++"):
             print(f"{GREEN}{line}{RESET}")
-        elif line.startswith('-') and not line.startswith('---'):
+        elif line.startswith("-") and not line.startswith("---"):
             print(f"{RED}{line}{RESET}")
         else:
             print(line)
@@ -102,8 +110,8 @@ def print_diff(original_text: str, corrected_text: str) -> None:
 def copy_text_at_cursor() -> None:
     key = Key.cmd if is_mac() else Key.ctrl
     with controller.pressed(key):
-        controller.press('c')
-        controller.release('c')
+        controller.press("c")
+        controller.release("c")
     time.sleep(0.1)
 
 
@@ -111,7 +119,7 @@ def correct_grammar(text: str) -> Union[Response, None]:
     print(f" + Awaiting response from LLM...")
     try:
         response = chat(
-            model=MODEL, 
+            model=MODEL,
             messages=[
                 {
                     "role": "user",
@@ -130,10 +138,10 @@ def correct_grammar(text: str) -> Union[Response, None]:
 
             print(f" + Received corrected content: \n{response_obj.corrected_text}\n")
             return response_obj
-    
+
         else:
             print(" - Failed to receive response from LLM.")
-        
+
         return None
     except ResponseError:
         print(" - Unable to get response from Ollama.")
@@ -144,8 +152,8 @@ def correct_grammar(text: str) -> Union[Response, None]:
 def paste_text_at_cursor() -> None:
     key = Key.cmd if is_mac() else Key.ctrl
     with controller.pressed(key):
-        controller.press('v')
-        controller.release('v')
+        controller.press("v")
+        controller.release("v")
     time.sleep(0.1)
 
 
@@ -160,7 +168,7 @@ def on_activate() -> None:
     original_text = paste()
 
     print(f"\n + Copied text:\n{original_text}\n")
-    
+
     response = correct_grammar(original_text)
 
     if response and response.corrected_text:
