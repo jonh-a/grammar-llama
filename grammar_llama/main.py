@@ -42,6 +42,10 @@ def is_mac() -> bool:
     return sys.platform.startswith("darwin")
 
 
+def chunk_text(text: str) -> List[str]:
+    return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+
+
 MODEL = get_model()
 PROMPT = get_prompt()
 IS_MAC = is_mac()
@@ -56,140 +60,139 @@ class Response(BaseModel):
     tone: str
 
 
-def get_hotkey_combo() -> str:
-    hotkey_specification = os.getenv("CHECKER_HOTKEY")
+class GrammarChecker:
+    def __init__(self):
+        self.model = get_model()
+        self.prompt = get_prompt()
+        self.is_mac = is_mac()
+        self.modifier_key = Key.cmd if self.is_mac else Key.ctrl
+        self.hotkey = self.get_hotkey_combo()
 
-    if hotkey_specification:
-        return hotkey_specification
-    elif sys.platform.startswith("darwin"):
-        return "<ctrl>+<cmd>+a"
-    else:
-        return "<ctrl>+<alt>+a"
+        try:
+            self.run_startup_tasks()
 
+            with GlobalHotKeys({self.hotkey: self.on_activate}) as h:
+                h.join()
+        except KeyboardInterrupt:
+            sys.exit(0)
+        except Exception as e:
+            print(" - An unhandled exception occurred: {e}")
 
-def run_startup_tasks() -> None:
-    try:
-        ps()
-        show(MODEL)
-    except ConnectError:
-        print(" - Failed to connect to Ollama.")
-        sys.exit(1)
-    except ResponseError:
-        print(f" - Ollama model {MODEL} not found.")
-        sys.exit(1)
+    def get_hotkey_combo(self) -> str:
+        hotkey_specification = os.getenv("CHECKER_HOTKEY")
 
-    print(" + Startup tasks passed.")
-    print(f" + Using model: {MODEL}")
-    print(f" + Using prompt: {PROMPT}\n")
-
-
-def chunk_text(text: str) -> List[str]:
-    return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
-
-
-def print_diff(original_text: str, corrected_text: str) -> None:
-    original_chunks = chunk_text(original_text)
-    corrected_chunks = chunk_text(corrected_text)
-    diff = unified_diff(
-        original_chunks,
-        corrected_chunks,
-        lineterm="",
-        fromfile="original",
-        tofile="corrected",
-    )
-
-    for line in diff:
-        if line.startswith("+") and not line.startswith("+++"):
-            print(f"{GREEN}{line}{RESET}")
-        elif line.startswith("-") and not line.startswith("---"):
-            print(f"{RED}{line}{RESET}")
+        if hotkey_specification:
+            return hotkey_specification
+        elif self.is_mac:
+            return "<ctrl>+<cmd>+a"
         else:
-            print(line)
+            return "<ctrl>+<alt>+a"
 
+    def run_startup_tasks(self) -> None:
+        try:
+            ps()
+            show(self.model)
+        except ConnectError:
+            print(" - Failed to connect to Ollama.")
+            sys.exit(1)
+        except ResponseError:
+            print(f" - Ollama model {self.model} not found.")
+            sys.exit(1)
 
-def copy_text_at_cursor() -> None:
-    key = Key.cmd if is_mac() else Key.ctrl
-    with controller.pressed(key):
-        controller.press("c")
-        controller.release("c")
-    time.sleep(0.1)
+        print(" + Startup tasks passed.")
+        print(f" + Using model: {self.model}")
+        print(f" + Using prompt: {self.prompt}\n")
 
-
-def correct_grammar(text: str) -> Union[Response, None]:
-    print(f" + Awaiting response from LLM...")
-    try:
-        response = chat(
-            model=MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": PROMPT,
-                },
-                {
-                    "role": "user",
-                    "content": text,
-                },
-            ],
-            format=Response.model_json_schema(),
+    def print_diff(self, original_text: str, corrected_text: str) -> None:
+        original_chunks = chunk_text(original_text)
+        corrected_chunks = chunk_text(corrected_text)
+        diff = unified_diff(
+            original_chunks,
+            corrected_chunks,
+            lineterm="",
+            fromfile="original",
+            tofile="corrected",
         )
 
-        if response and response.message and response.message.content:
-            response_obj = Response.model_validate_json(response.message.content)
+        for line in diff:
+            if line.startswith("+") and not line.startswith("+++"):
+                print(f"{GREEN}{line}{RESET}")
+            elif line.startswith("-") and not line.startswith("---"):
+                print(f"{RED}{line}{RESET}")
+            else:
+                print(line)
 
-            print(f" + Received corrected content: \n{response_obj.corrected_text}\n")
-            return response_obj
+    def copy_text_at_cursor(self) -> None:
+        with controller.pressed(self.modifier_key):
+            controller.press("c")
+            controller.release("c")
+        time.sleep(0.1)
 
+    def correct_grammar(self, text: str) -> Union[Response, None]:
+        print(f" + Awaiting response from LLM...")
+        try:
+            response = chat(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": PROMPT,
+                    },
+                    {
+                        "role": "user",
+                        "content": text,
+                    },
+                ],
+                format=Response.model_json_schema(),
+            )
+
+            if response and response.message and response.message.content:
+                response_obj = Response.model_validate_json(response.message.content)
+
+                print(
+                    f" + Received corrected content: \n{response_obj.corrected_text}\n"
+                )
+                return response_obj
+
+            else:
+                print(" - Failed to receive response from LLM.")
+
+            return None
+        except ResponseError:
+            print(" - Unable to get response from Ollama.")
+        except Exception as e:
+            print(f" - An unexpected error occurred: {e}")
+
+    def paste_text_at_cursor(self) -> None:
+        with controller.pressed(self.modifier_key):
+            controller.press("v")
+            controller.release("v")
+        time.sleep(0.1)
+
+    def summarize_grammar(self, response: Response) -> None:
+        print(f"\n + Original text score: {response.original_grammar_strength}")
+        print(f"\n + Original text tone: {response.tone}")
+        print(f" + Summary of corrections: {response.summary_of_corrections}\n")
+
+    def on_activate(self) -> None:
+        self.copy_text_at_cursor()
+        original_text = paste()
+
+        print(f"\n + Copied text:\n{original_text}\n")
+
+        response = self.correct_grammar(original_text)
+
+        if response and response.corrected_text:
+            self.print_diff(original_text, response.corrected_text)
+            self.summarize_grammar(response)
+            copy(response.corrected_text)
+            self.paste_text_at_cursor()
         else:
-            print(" - Failed to receive response from LLM.")
-
-        return None
-    except ResponseError:
-        print(" - Unable to get response from Ollama.")
-    except Exception as e:
-        print(f" - An unexpected error occurred: {e}")
-
-
-def paste_text_at_cursor() -> None:
-    key = Key.cmd if is_mac() else Key.ctrl
-    with controller.pressed(key):
-        controller.press("v")
-        controller.release("v")
-    time.sleep(0.1)
-
-
-def summarize_grammar(response: Response) -> None:
-    print(f"\n + Original text score: {response.original_grammar_strength}")
-    print(f"\n + Original text tone: {response.tone}")
-    print(f" + Summary of corrections: {response.summary_of_corrections}\n")
-
-
-def on_activate() -> None:
-    copy_text_at_cursor()
-    original_text = paste()
-
-    print(f"\n + Copied text:\n{original_text}\n")
-
-    response = correct_grammar(original_text)
-
-    if response and response.corrected_text:
-        print_diff(original_text, response.corrected_text)
-        summarize_grammar(response)
-        copy(response.corrected_text)
-        paste_text_at_cursor()
-    else:
-        print(" - Correction failed; skipping paste.")
+            print(" - Correction failed; skipping paste.")
 
 
 def main():
-    try:
-        run_startup_tasks()
-
-        with GlobalHotKeys({get_hotkey_combo(): on_activate}) as h:
-            h.join()
-    except KeyboardInterrupt:
-        sys.exit(0)
-    except Exception as e:
-        print(" - An unhandled exception occurred: {e}")
+    GrammarChecker()
 
 
 if __name__ == "__main__":
