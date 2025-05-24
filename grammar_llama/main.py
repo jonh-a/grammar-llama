@@ -1,7 +1,7 @@
 from pynput.keyboard import Controller, Key, GlobalHotKeys
 from ollama import ps, show, ResponseError, AsyncClient
 from pydantic import BaseModel
-from pyperclip import copy, paste
+from pyperclip import copy, paste  # type: ignore
 from httpx import ConnectError
 from difflib import unified_diff
 from typing import List, Union, Literal, Optional
@@ -157,7 +157,7 @@ class GrammarChecker:
                 await asyncio.sleep(0.1)
 
             response = await chat_task
-            
+
             if response and response.message and response.message.content:
                 response_obj = Response.model_validate_json(response.message.content)
 
@@ -175,8 +175,10 @@ class GrammarChecker:
             raise
         except ResponseError:
             print(" - Unable to get response from Ollama.")
+            return None
         except Exception as e:
             print(f" - An unexpected error occurred: {e}")
+            return None
 
     async def paste_text_at_cursor(self) -> None:
         with self.controller.pressed(self.modifier_key):
@@ -192,7 +194,7 @@ class GrammarChecker:
     async def process_text(self) -> None:
         self.cancelled = False
         async with self.lock:
-            original_text = await self.copy_text_at_cursor() 
+            original_text = await self.copy_text_at_cursor()
             print(f"\n + Copied text:\n{original_text}\n")
 
             response = await self.correct_grammar(original_text)
@@ -212,7 +214,7 @@ class GrammarChecker:
 
         self.cancelled = False
         self.current_task = asyncio.create_task(self.process_text())
-        
+
 
 async def main_async():
     checker = GrammarChecker()
@@ -252,7 +254,7 @@ def main():
             pending = asyncio.all_tasks(loop)
             for task in pending:
                 task.cancel()
-            
+
             loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
             loop.close()
     except Exception as e:
