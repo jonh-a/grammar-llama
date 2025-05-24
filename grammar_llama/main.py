@@ -1,11 +1,11 @@
 from pynput.keyboard import Controller, Key, GlobalHotKeys
-from ollama import chat, ps, show, ResponseError
+from ollama import ps, show, ResponseError, AsyncClient
 from pydantic import BaseModel
 from pyperclip import copy, paste
 from httpx import ConnectError
 from difflib import unified_diff
-from typing import List, Union, Literal
-import time
+from typing import List, Union, Literal, Optional
+import asyncio
 import os
 import re
 import sys
@@ -50,8 +50,6 @@ MODEL = get_model()
 PROMPT = get_prompt()
 IS_MAC = is_mac()
 
-controller = Controller()
-
 
 class Response(BaseModel):
     original_grammar_strength: Literal[1, 2, 3]
@@ -62,17 +60,20 @@ class Response(BaseModel):
 
 class GrammarChecker:
     def __init__(self):
+        self.controller = Controller()
         self.model = get_model()
         self.prompt = get_prompt()
         self.is_mac = is_mac()
         self.modifier_key = Key.cmd if self.is_mac else Key.ctrl
         self.hotkey = self.get_hotkey_combo()
 
+        self.current_task: Optional[asyncio.Task] = None
+        self.client = AsyncClient()
+        self.lock = asyncio.Lock()
+        self.cancelled = False
+
         try:
             self.run_startup_tasks()
-
-            with GlobalHotKeys({self.hotkey: self.on_activate}) as h:
-                h.join()
         except KeyboardInterrupt:
             sys.exit(0)
         except Exception as e:
@@ -122,30 +123,41 @@ class GrammarChecker:
             else:
                 print(line)
 
-    def copy_text_at_cursor(self) -> None:
-        with controller.pressed(self.modifier_key):
-            controller.press("c")
-            controller.release("c")
-        time.sleep(0.1)
+    async def copy_text_at_cursor(self) -> str:
+        with self.controller.pressed(self.modifier_key):
+            self.controller.press("c")
+            self.controller.release("c")
+        await asyncio.sleep(0.1)
+        return paste()
 
-    def correct_grammar(self, text: str) -> Union[Response, None]:
+    async def correct_grammar(self, text: str) -> Union[Response, None]:
         print(f" + Awaiting response from LLM...")
         try:
-            response = chat(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": PROMPT,
-                    },
-                    {
-                        "role": "user",
-                        "content": text,
-                    },
-                ],
-                format=Response.model_json_schema(),
+            chat_task = asyncio.create_task(
+                self.client.chat(
+                    model=self.model,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": PROMPT,
+                        },
+                        {
+                            "role": "user",
+                            "content": text,
+                        },
+                    ],
+                    format=Response.model_json_schema(),
+                )
             )
 
+            while not chat_task.done():
+                if self.cancelled:
+                    chat_task.cancel()
+                    raise asyncio.CancelledError()
+                await asyncio.sleep(0.1)
+
+            response = await chat_task
+            
             if response and response.message and response.message.content:
                 response_obj = Response.model_validate_json(response.message.content)
 
@@ -158,41 +170,94 @@ class GrammarChecker:
                 print(" - Failed to receive response from LLM.")
 
             return None
+        except asyncio.CancelledError:
+            print(" + Cancelling LLM request...")
+            raise
         except ResponseError:
             print(" - Unable to get response from Ollama.")
         except Exception as e:
             print(f" - An unexpected error occurred: {e}")
 
-    def paste_text_at_cursor(self) -> None:
-        with controller.pressed(self.modifier_key):
-            controller.press("v")
-            controller.release("v")
-        time.sleep(0.1)
+    async def paste_text_at_cursor(self) -> None:
+        with self.controller.pressed(self.modifier_key):
+            self.controller.press("v")
+            self.controller.release("v")
+        await asyncio.sleep(0.1)
 
     def summarize_grammar(self, response: Response) -> None:
         print(f"\n + Original text score: {response.original_grammar_strength}")
         print(f"\n + Original text tone: {response.tone}")
         print(f" + Summary of corrections: {response.summary_of_corrections}\n")
 
-    def on_activate(self) -> None:
-        self.copy_text_at_cursor()
-        original_text = paste()
+    async def process_text(self) -> None:
+        self.cancelled = False
+        async with self.lock:
+            original_text = await self.copy_text_at_cursor() 
+            print(f"\n + Copied text:\n{original_text}\n")
 
-        print(f"\n + Copied text:\n{original_text}\n")
+            response = await self.correct_grammar(original_text)
 
-        response = self.correct_grammar(original_text)
+            if response and response.corrected_text:
+                self.print_diff(original_text, response.corrected_text)
+                self.summarize_grammar(response)
+                copy(response.corrected_text)
+                await self.paste_text_at_cursor()
+            else:
+                print(" - Correction failed; skipping paste.")
 
-        if response and response.corrected_text:
-            self.print_diff(original_text, response.corrected_text)
-            self.summarize_grammar(response)
-            copy(response.corrected_text)
-            self.paste_text_at_cursor()
-        else:
-            print(" - Correction failed; skipping paste.")
+    async def handle_hotkey(self) -> None:
+        if self.current_task and not self.current_task.done():
+            self.cancelled = True
+            self.current_task.cancel()
+
+        self.cancelled = False
+        self.current_task = asyncio.create_task(self.process_text())
+        
+
+async def main_async():
+    checker = GrammarChecker()
+    loop = asyncio.get_event_loop()
+
+    def on_activate():
+        asyncio.run_coroutine_threadsafe(coro=checker.handle_hotkey(), loop=loop)
+
+    hotkey_handler = GlobalHotKeys({checker.hotkey: on_activate})
+    hotkey_handler.start()
+
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        hotkey_handler.stop()
+        if checker.current_task and not checker.current_task.done():
+            checker.current_task.cancel()
+            try:
+                loop.run_until_complete(checker.current_task)
+            except asyncio.CancelledError:
+                pass
 
 
 def main():
-    GrammarChecker()
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        try:
+            loop.run_until_complete(main_async())
+        except KeyboardInterrupt:
+            print(" + Shutting down...")
+        finally:
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.close()
+    except Exception as e:
+        print(f" - An unhandled exception occurred: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
